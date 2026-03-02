@@ -1,5 +1,6 @@
 package com.MajorProject.MainProject.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -19,47 +20,53 @@ public class TestSession {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Topic the user entered to generate the test
     @Column(nullable = false)
     private String topic;
 
-    @Builder.Default
-    private Integer totalQuestions = 5;
-
-    @Builder.Default
-    private Integer score = 0;
-
-    @Builder.Default
-    private Integer currentQuestionIndex = 0;
+    @Enumerated(EnumType.STRING)
+    @Column(name = "difficulty_level", nullable = false)
+    private Conversation.DifficultyLevel difficultyLevel;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    @Builder.Default
-    private TestStatus status = TestStatus.IN_PROGRESS;
+    private TestStatus status;
+
+    @Column(name = "total_questions")
+    private Integer totalQuestions;
+
+    @Column(name = "correct_answers")
+    private Integer correctAnswers;
+
+    @Column(name = "score_percentage")
+    private Double scorePercentage;
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 
-    @Column(name = "completed_at")
-    private LocalDateTime completedAt;
+    @Column(name = "submitted_at")
+    private LocalDateTime submittedAt;
 
     // ----------------------------------------
     // Relationships
     // ----------------------------------------
+    @JsonIgnoreProperties({"password", "conversations", "documents", "testSessions"})
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
+    // Optionally linked to a document for RAG-based test generation
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "document_id")
+    private Document sourceDocument;
+
     @OneToMany(mappedBy = "testSession", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
-    @OrderBy("questionNumber ASC")
     private List<TestQuestion> questions;
 
     // ----------------------------------------
     // Enum
     // ----------------------------------------
     public enum TestStatus {
-        IN_PROGRESS,
-        COMPLETED
+        GENERATED, SUBMITTED
     }
 }

@@ -1,5 +1,6 @@
 package com.MajorProject.MainProject.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -17,37 +18,31 @@ public class TestQuestion {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
-    private Integer questionNumber;  // 1 to 5
-
     @Column(nullable = false, columnDefinition = "TEXT")
-    private String questionText;
+    private String question;
 
-    // Storing options as JSON array string: ["A. opt1", "B. opt2", "C. opt3", "D. opt4"]
-    @ElementCollection
-    @CollectionTable(name = "question_options", joinColumns = @JoinColumn(name = "question_id"))
-    @Column(name = "option_text")
-    private List<String> options;
+    @Column(name = "correct_option_index", nullable = false)
+    private Integer correctOptionIndex; // 0-3 (index of correct option)
 
-    // "A", "B", "C", or "D"
-    @Column(nullable = false)
-    private String correctAnswer;
-
-    // Explanation shown after user answers
     @Column(columnDefinition = "TEXT")
     private String explanation;
 
-    // What user selected — null until answered
-    private String userAnswer;
+    @Column(name = "question_order")
+    private Integer questionOrder;
 
-    @Column(nullable = false)
-    @Builder.Default
-    private Boolean isCorrect = false;
+    // What user selected — null until submitted
+    @Column(name = "selected_option_index")
+    private Integer selectedOptionIndex;
 
     // ----------------------------------------
     // Relationships
     // ----------------------------------------
+    @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "session_id", nullable = false)
+    @JoinColumn(name = "test_session_id", nullable = false)
     private TestSession testSession;
+
+    @OneToMany(mappedBy = "testQuestion", cascade = CascadeType.ALL, fetch = FetchType.EAGER)
+    @OrderBy("optionIndex ASC")
+    private List<QuestionOption> options;
 }

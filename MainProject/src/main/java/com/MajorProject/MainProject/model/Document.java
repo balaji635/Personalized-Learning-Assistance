@@ -1,5 +1,7 @@
 package com.MajorProject.MainProject.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -18,28 +20,28 @@ public class Document {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
+    @Column(name = "original_file_name", nullable = false)
     private String originalFileName;
 
-    // Path where file is stored on disk
-    @Column(nullable = false)
-    private String filePath;
-
-    // PDF, DOCX, TXT
-    @Column(nullable = false)
+    @Column(name = "file_type", nullable = false)
     private String fileType;
 
-    // File size in bytes
+    @Column(name = "file_size")
     private Long fileSize;
+
+    // ← Store raw file bytes directly in PostgreSQL (bytea column)
+    // No filesystem needed — file lives entirely in the DB
+    @JsonIgnore  // never send binary data in API responses
+    @Lob
+    @Column(name = "file_data", nullable = false)
+    private byte[] fileData;
+
+    @Column(name = "chunk_count")
+    private Integer chunkCount;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    @Builder.Default
-    private DocumentStatus status = DocumentStatus.PROCESSING;
-
-    // Number of chunks embedded into vector store
-    @Builder.Default
-    private Integer chunkCount = 0;
+    private DocumentStatus status;
 
     @CreationTimestamp
     @Column(name = "uploaded_at", updatable = false)
@@ -48,6 +50,7 @@ public class Document {
     // ----------------------------------------
     // Relationships
     // ----------------------------------------
+    @JsonIgnoreProperties({"password", "conversations", "documents", "testSessions"})
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
@@ -56,8 +59,6 @@ public class Document {
     // Enum
     // ----------------------------------------
     public enum DocumentStatus {
-        PROCESSING,   // file uploaded, embedding in progress
-        READY,        // embedding done, ready to use in RAG
-        FAILED        // embedding failed
+        PROCESSING, READY, FAILED
     }
 }

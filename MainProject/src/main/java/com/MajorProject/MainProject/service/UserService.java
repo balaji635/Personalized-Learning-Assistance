@@ -1,4 +1,4 @@
 package com.MajorProject.MainProject.service;
 
-public class authService {
+public class UserService {
 }

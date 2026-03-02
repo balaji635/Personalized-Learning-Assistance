@@ -1,14 +1,15 @@
 package com.MajorProject.MainProject.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
-import jakarta.validation.constraints.Email;
-import jakarta.validation.constraints.NotBlank;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UuidGenerator;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.UUID;
 
 @Entity
 @Table(name = "users")
@@ -19,30 +20,26 @@ import java.util.List;
 public class User {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    @UuidGenerator(style = UuidGenerator.Style.TIME) // UUID v7 — time-ordered
+    @Column(updatable = false, nullable = false, columnDefinition = "uuid")
+    private UUID id;
 
-    @NotBlank
-    @Column(nullable = false)
+    @Column(name = "first_name", nullable = false)
     private String firstName;
 
-    @NotBlank
-    @Column(nullable = false)
+    @Column(name = "last_name", nullable = false)
     private String lastName;
 
-    @Email
-    @NotBlank
     @Column(nullable = false, unique = true)
     private String email;
 
-    @NotBlank
+    @JsonIgnore
     @Column(nullable = false)
     private String password;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    @Builder.Default
-    private Role role = Role.USER;
+    private Role role;
 
     @Column(name = "profile_picture")
     private String profilePicture;
@@ -50,9 +47,8 @@ public class User {
     @Column(columnDefinition = "TEXT")
     private String bio;
 
-    @Column(nullable = false)
-    @Builder.Default
-    private Boolean isActive = true;
+    @Column(name = "is_active", nullable = false)
+    private boolean isActive;
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
@@ -65,12 +61,15 @@ public class User {
     // ----------------------------------------
     // Relationships
     // ----------------------------------------
+    @JsonIgnore
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<Conversation> conversations;
 
+    @JsonIgnore
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<Document> documents;
 
+    @JsonIgnore
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<TestSession> testSessions;
 
