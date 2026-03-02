@@ -149,6 +149,7 @@
 	</dependencyManagement>
 
 	<build>
+        <finalName>LearningAssistant</finalName>
 		<plugins>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>

@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: pgvector-db
+    environment:
+      POSTGRES_DB: learning_assistant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: B@laji1233
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build: .
+    container_name: learning-assistant
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
