@@ -70,24 +70,19 @@ public class DocumentService {
         document = documentRepository.save(document);
 
         try {
-            String extractedText = extractText(fileBytes, normalizedContentType, originalFileName);
-            if (extractedText.isBlank()) {
-                throw new BadRequestException("No readable text found in this document");
-            }
-
-            List<String> chunks = chunkText(extractedText);
-            if (chunks.isEmpty()) {
+            List<ChunkSegment> chunkSegments = extractAndChunkContent(fileBytes, normalizedContentType, originalFileName);
+            if (chunkSegments.isEmpty()) {
                 throw new BadRequestException("No readable text chunks found in this document");
             }
 
-            storeChunksInVectorStore(chunks, document, user);
+            storeChunksInVectorStore(chunkSegments, document, user);
 
-            document.setChunkCount(chunks.size());
+            document.setChunkCount(chunkSegments.size());
             document.setStatus(Document.DocumentStatus.READY);
             document = documentRepository.save(document);
 
             log.info("Document processed: {} ({} chunks) for user {}",
-                    file.getOriginalFilename(), chunks.size(), email);
+                    file.getOriginalFilename(), chunkSegments.size(), email);
 
         } catch (BadRequestException e) {
             markFailed(document);
@@ -146,13 +141,39 @@ public class DocumentService {
 
             StringBuilder context = new StringBuilder();
             context.append("Relevant information from uploaded documents:\n\n");
+
+            int included = 0;
             for (org.springframework.ai.document.Document resultDoc : results) {
-                if (resultDoc.getText() == null || resultDoc.getText().isBlank()) {
+                String text = resultDoc.getText();
+                if (text == null || text.isBlank()) {
                     continue;
                 }
-                context.append(resultDoc.getText()).append("\n\n---\n\n");
+
+                Map<String, Object> metadata = resultDoc.getMetadata();
+                String fileName = metadataValueAsString(metadata, "fileName");
+                String pageNumber = metadataValueAsString(metadata, "pageNumber");
+                String chunkIndex = metadataValueAsString(metadata, "chunkIndex");
+
+                context.append("[Source");
+                if (!fileName.isBlank()) {
+                    context.append(": ").append(fileName);
+                }
+                if (!pageNumber.isBlank()) {
+                    context.append(" | page ").append(pageNumber);
+                }
+                if (!chunkIndex.isBlank()) {
+                    context.append(" | chunk ").append(chunkIndex);
+                }
+                context.append("]\n");
+                context.append(text.trim()).append("\n\n---\n\n");
+
+                included++;
+                if (included >= safeTopK) {
+                    break;
+                }
             }
-            return context.toString();
+
+            return included == 0 ? "" : context.toString();
 
         } catch (Exception e) {
             log.warn("Vector search failed: {}", e.getMessage());
@@ -160,27 +181,57 @@ public class DocumentService {
         }
     }
 
-    private String extractText(byte[] fileBytes, String contentType, String fileName) throws IOException {
+    private List<ChunkSegment> extractAndChunkContent(byte[] fileBytes, String contentType, String fileName) throws IOException {
         String normalizedContentType = normalizeContentType(contentType);
         String extension = extractExtension(fileName);
 
         if (normalizedContentType.contains("pdf") || ".pdf".equals(extension)) {
-            return extractFromPdf(fileBytes);
-        }
-        if (normalizedContentType.contains("wordprocessingml.document") || ".docx".equals(extension)) {
-            return extractFromDocx(fileBytes);
-        }
-        if ("application/msword".equals(normalizedContentType) || ".doc".equals(extension)) {
-            return extractFromDoc(fileBytes);
+            return extractAndChunkPdf(fileBytes);
         }
 
-        return new String(fileBytes, StandardCharsets.UTF_8);
+        String extractedText;
+        if (normalizedContentType.contains("wordprocessingml.document") || ".docx".equals(extension)) {
+            extractedText = extractFromDocx(fileBytes);
+        } else if ("application/msword".equals(normalizedContentType) || ".doc".equals(extension)) {
+            extractedText = extractFromDoc(fileBytes);
+        } else {
+            extractedText = new String(fileBytes, StandardCharsets.UTF_8);
+        }
+
+        if (extractedText == null || extractedText.isBlank()) {
+            return List.of();
+        }
+
+        List<ChunkSegment> chunkSegments = new ArrayList<>();
+        for (String chunk : chunkText(extractedText)) {
+            chunkSegments.add(new ChunkSegment(chunk, null));
+        }
+        return chunkSegments;
     }
 
-    private String extractFromPdf(byte[] fileBytes) throws IOException {
+    private List<ChunkSegment> extractAndChunkPdf(byte[] fileBytes) throws IOException {
+        List<ChunkSegment> chunkSegments = new ArrayList<>();
+
         try (PDDocument pdDocument = Loader.loadPDF(fileBytes)) {
-            return new PDFTextStripper().getText(pdDocument);
+            PDFTextStripper stripper = new PDFTextStripper();
+            int totalPages = pdDocument.getNumberOfPages();
+
+            for (int page = 1; page <= totalPages; page++) {
+                stripper.setStartPage(page);
+                stripper.setEndPage(page);
+
+                String pageText = stripper.getText(pdDocument);
+                if (pageText == null || pageText.isBlank()) {
+                    continue;
+                }
+
+                for (String chunk : chunkText(pageText)) {
+                    chunkSegments.add(new ChunkSegment(chunk, page));
+                }
+            }
         }
+
+        return chunkSegments;
     }
 
     private String extractFromDocx(byte[] fileBytes) throws IOException {
@@ -220,20 +271,25 @@ public class DocumentService {
         return chunks;
     }
 
-    private void storeChunksInVectorStore(List<String> chunks, Document document, User user) {
+    private void storeChunksInVectorStore(List<ChunkSegment> chunks, Document document, User user) {
         if (chunks.isEmpty()) {
             return;
         }
 
         List<org.springframework.ai.document.Document> aiDocuments = new ArrayList<>();
         for (int i = 0; i < chunks.size(); i++) {
+            ChunkSegment segment = chunks.get(i);
+
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("documentId", document.getId().toString());
             metadata.put("userId", user.getId().toString());
             metadata.put("fileName", document.getOriginalFileName());
             metadata.put("chunkIndex", i);
+            if (segment.pageNumber() != null) {
+                metadata.put("pageNumber", segment.pageNumber());
+            }
 
-            aiDocuments.add(new org.springframework.ai.document.Document(chunks.get(i), metadata));
+            aiDocuments.add(new org.springframework.ai.document.Document(segment.text(), metadata));
         }
 
         vectorStore.add(aiDocuments);
@@ -331,8 +387,18 @@ public class DocumentService {
         return fileName.substring(lastDot).toLowerCase(Locale.ROOT);
     }
 
+    private String metadataValueAsString(Map<String, Object> metadata, String key) {
+        if (metadata == null || !metadata.containsKey(key) || metadata.get(key) == null) {
+            return "";
+        }
+        return String.valueOf(metadata.get(key)).trim();
+    }
+
     private void markFailed(Document document) {
         document.setStatus(Document.DocumentStatus.FAILED);
         documentRepository.save(document);
+    }
+
+    private record ChunkSegment(String text, Integer pageNumber) {
     }
 }
