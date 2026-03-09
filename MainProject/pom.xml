@@ -117,23 +117,22 @@
             <version>0.12.3</version>
         </dependency>
 
-        <!-- Apache Tika for PDF/DOCX parsing -->
+                <!-- Apache POI for DOC/DOCX extraction -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.4.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-scratchpad</artifactId>
+            <version>5.4.1</version>
+        </dependency>
+        <!-- Apache Tika core -->
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-core</artifactId>
             <version>2.9.1</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.tika</groupId>
-            <artifactId>tika-core</artifactId>
-            <version>2.9.1</version>
-        </dependency>
-
-        <!-- Lombok (optional but saves a lot of boilerplate) -->
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <optional>true</optional>
         </dependency>
 	</dependencies>
 	<dependencyManagement>
@@ -179,3 +178,4 @@
 	</build>
 
 </project>
+

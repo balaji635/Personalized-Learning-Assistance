@@ -1,11 +1,15 @@
 package com.service;
 
+import com.config.JwtConfig;
 import com.dto.AuthResponse;
 import com.dto.LoginRequest;
 import com.dto.RegisterRequest;
+import com.dto.UserProfileResponse;
+import com.exception.BadRequestException;
+import com.exception.ConflictException;
+import com.exception.NotFoundException;
 import com.model.User;
 import com.repositry.UserRepository;
-import com.config.JwtConfig;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -13,7 +17,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -28,14 +31,11 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final JwtConfig jwtConfig;
     private final AuthenticationManager authenticationManager;
-    private final com.service.CustomUserDetailsService customUserDetailsService;
+    private final CustomUserDetailsService customUserDetailsService;
 
-    // ----------------------------------------
-    // REGISTER
-    // ----------------------------------------
     public AuthResponse register(RegisterRequest request, HttpServletResponse response) {
         if (userRepository.existsByEmail(request.getEmail())) {
-            throw new RuntimeException("Email already registered");
+            throw new ConflictException("Email already registered");
         }
 
         User user = User.builder()
@@ -56,43 +56,44 @@ public class AuthService {
         String accessToken = jwtConfig.generateAccessToken(userDetails);
         String refreshToken = jwtConfig.generateRefreshToken(userDetails);
 
-        // Set tokens in HttpOnly cookies
         setTokenCookies(response, accessToken, refreshToken);
-
         return buildAuthResponse(user, accessToken, refreshToken);
     }
 
-    // ----------------------------------------
-    // LOGIN
-    // ----------------------------------------
     public AuthResponse login(LoginRequest request, HttpServletResponse response) {
         authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
         );
 
         User user = userRepository.findByEmail(request.getEmail())
-                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+                .orElseThrow(() -> new NotFoundException("User not found"));
 
         UserDetails userDetails = customUserDetailsService.loadUserByUsername(user.getEmail());
         String accessToken = jwtConfig.generateAccessToken(userDetails);
         String refreshToken = jwtConfig.generateRefreshToken(userDetails);
 
-        // Set tokens in HttpOnly cookies
         setTokenCookies(response, accessToken, refreshToken);
 
         log.info("User logged in: {}", request.getEmail());
         return buildAuthResponse(user, accessToken, refreshToken);
     }
 
-    // ----------------------------------------
-    // REFRESH TOKEN
-    // ----------------------------------------
     public AuthResponse refreshToken(String refreshToken, HttpServletResponse response) {
-        String email = jwtConfig.extractUsername(refreshToken);
+        if (refreshToken == null || refreshToken.isBlank()) {
+            throw new BadRequestException("Refresh token is required");
+        }
+
+        String email;
+        try {
+            email = jwtConfig.extractUsername(refreshToken);
+        } catch (Exception ex) {
+            throw new BadRequestException("Invalid refresh token");
+        }
+
         UserDetails userDetails = customUserDetailsService.loadUserByUsername(email);
 
         if (!jwtConfig.isTokenValid(refreshToken, userDetails) || !jwtConfig.isRefreshToken(refreshToken)) {
-            throw new RuntimeException("Invalid refresh token");
+            throw new BadRequestException("Invalid refresh token");
         }
 
         String newAccessToken = jwtConfig.generateAccessToken(userDetails);
@@ -101,36 +102,35 @@ public class AuthService {
         setTokenCookies(response, newAccessToken, newRefreshToken);
 
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+                .orElseThrow(() -> new NotFoundException("User not found"));
 
         return buildAuthResponse(user, newAccessToken, newRefreshToken);
     }
 
-    // ----------------------------------------
-    // LOGOUT — clear cookies
-    // ----------------------------------------
+    public UserProfileResponse getCurrentUserProfile(String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new NotFoundException("User not found"));
+
+        return buildUserProfileResponse(user);
+    }
+
     public void logout(HttpServletResponse response) {
         clearTokenCookies(response);
     }
 
-    // ----------------------------------------
-    // COOKIE HELPERS
-    // ----------------------------------------
     private void setTokenCookies(HttpServletResponse response, String accessToken, String refreshToken) {
-        // Access token cookie — 24 hours
         Cookie accessCookie = new Cookie("access_token", accessToken);
-        accessCookie.setHttpOnly(true);   // JS cannot read this — XSS protection
-        accessCookie.setSecure(false);    // Set true in production (HTTPS only)
+        accessCookie.setHttpOnly(true);
+        accessCookie.setSecure(false);
         accessCookie.setPath("/");
-        accessCookie.setMaxAge(86400);    // 24 hours in seconds
+        accessCookie.setMaxAge(86400);
         response.addCookie(accessCookie);
 
-        // Refresh token cookie — 7 days
         Cookie refreshCookie = new Cookie("refresh_token", refreshToken);
         refreshCookie.setHttpOnly(true);
-        refreshCookie.setSecure(false);   // Set true in production
+        refreshCookie.setSecure(false);
         refreshCookie.setPath("/");
-        refreshCookie.setMaxAge(604800);  // 7 days in seconds
+        refreshCookie.setMaxAge(604800);
         response.addCookie(refreshCookie);
     }
 
@@ -146,14 +146,21 @@ public class AuthService {
         response.addCookie(refreshCookie);
     }
 
-    // ----------------------------------------
-    // HELPER
-    // ----------------------------------------
     private AuthResponse buildAuthResponse(User user, String accessToken, String refreshToken) {
         return AuthResponse.builder()
                 .accessToken(accessToken)
                 .refreshToken(refreshToken)
                 .tokenType("Bearer")
+                .userId(user.getId())
+                .firstName(user.getFirstName())
+                .lastName(user.getLastName())
+                .email(user.getEmail())
+                .role(user.getRole().name())
+                .build();
+    }
+
+    private UserProfileResponse buildUserProfileResponse(User user) {
+        return UserProfileResponse.builder()
                 .userId(user.getId())
                 .firstName(user.getFirstName())
                 .lastName(user.getLastName())

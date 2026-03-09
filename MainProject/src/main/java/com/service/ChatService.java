@@ -3,6 +3,8 @@ package com.service;
 import com.config.JpaChatMemory;
 import com.dto.ChatRequest;
 import com.dto.ChatResponse;
+import com.exception.BadRequestException;
+import com.exception.NotFoundException;
 import com.model.Conversation;
 import com.model.Message;
 import com.model.User;
@@ -12,7 +14,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,29 +30,27 @@ public class ChatService {
     private final UserRepository userRepository;
     private final ConversationService conversationService;
     private final JpaChatMemory jpaChatMemory;
-    private final DocumentService documentService; // ← RAG
+    private final DocumentService documentService;
 
     @Transactional
     public ChatResponse chat(String email, Long conversationId, ChatRequest request) {
-
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+                .orElseThrow(() -> new NotFoundException("User not found"));
 
         Conversation conversation = conversationService.getConversationForUser(conversationId, user.getId());
+        String userMessage = request.getMessage().trim();
+        String memoryKey = "user_" + user.getId() + "_conv_" + conversationId;
 
-        String memoryKey = "user_" + user.getId().toString() + "_conv_" + conversationId;
-
-        // RAG — search user's uploaded documents for relevant context
         String ragContext = documentService.searchRelevantContext(
-                request.getMessage(),
+                userMessage,
                 user.getId().toString(),
-                6  // top 6 most relevant chunks
+                6
         );
 
         String systemPrompt = buildSystemPrompt(
                 conversation.getDifficultyLevel().name(),
                 user.getFirstName(),
-                ragContext  // inject document context into system prompt
+                ragContext
         );
 
         MessageChatMemoryAdvisor memoryAdvisor = MessageChatMemoryAdvisor.builder(jpaChatMemory)
@@ -60,17 +59,21 @@ public class ChatService {
 
         String aiResponse = chatClient.prompt()
                 .system(systemPrompt)
-                .user(request.getMessage())
+                .user(userMessage)
                 .advisors(memoryAdvisor)
                 .call()
                 .content();
 
-        conversationService.updateTitleIfDefault(conversationId, request.getMessage());
+        if (aiResponse == null || aiResponse.isBlank()) {
+            throw new BadRequestException("AI returned an empty response");
+        }
+
+        conversationService.updateTitleIfDefault(conversationId, userMessage);
 
         Message latestAssistant = messageRepository
                 .findByConversationIdOrderByCreatedAtAsc(conversationId)
                 .stream()
-                .filter(m -> m.getRole() == Message.MessageRole.ASSISTANT)
+                .filter(message -> message.getRole() == Message.MessageRole.ASSISTANT)
                 .reduce((first, second) -> second)
                 .orElse(null);
 
@@ -86,7 +89,7 @@ public class ChatService {
     }
 
     public void clearMemory(UUID userId, Long conversationId) {
-        jpaChatMemory.clear("user_" + userId.toString() + "_conv_" + conversationId);
+        jpaChatMemory.clear("user_" + userId + "_conv_" + conversationId);
     }
 
     private String buildSystemPrompt(String difficultyLevel, String firstName, String ragContext) {
@@ -98,7 +101,6 @@ public class ChatService {
                 firstName
         );
 
-        // If relevant document context found, prepend it
         if (ragContext != null && !ragContext.isBlank()) {
             basePrompt = ragContext + "\n\nUsing the above context when relevant, " + basePrompt;
         }

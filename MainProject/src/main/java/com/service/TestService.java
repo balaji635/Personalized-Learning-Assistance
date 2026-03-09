@@ -2,10 +2,20 @@ package com.service;
 
 import com.dto.GenerateTestRequest;
 import com.dto.SubmitTestRequest;
-import com.model.*;
-import com.repositry.*;
+import com.exception.BadRequestException;
+import com.exception.ConflictException;
+import com.exception.NotFoundException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.model.Conversation;
+import com.model.Document;
+import com.model.QuestionOption;
+import com.model.TestQuestion;
+import com.model.TestSession;
+import com.model.User;
+import com.repositry.TestQuestionRepository;
+import com.repositry.TestSessionRepository;
+import com.repositry.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -15,8 +25,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
-import java.util.UUID;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 @Slf4j
 @Service
@@ -27,126 +40,120 @@ public class TestService {
     private final TestSessionRepository testSessionRepository;
     private final TestQuestionRepository testQuestionRepository;
     private final UserRepository userRepository;
-    private final DocumentRepository documentRepository;
     private final DocumentService documentService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // ----------------------------------------
-    // GENERATE TEST
-    // ----------------------------------------
     @Transactional
     public TestSession generateTest(String email, GenerateTestRequest request) {
-
         User user = getUser(email);
 
-        // If documentId provided, get relevant context from PgVector
         String documentContext = "";
         Document sourceDocument = null;
 
         if (request.getDocumentId() != null) {
-            sourceDocument = documentRepository.findById(request.getDocumentId())
-                    .orElseThrow(() -> new RuntimeException("Document not found"));
-
-            if (!sourceDocument.getUser().getId().equals(user.getId())) {
-                throw new RuntimeException("Access denied to document");
-            }
-
+            sourceDocument = documentService.getDocumentForUser(email, request.getDocumentId());
             documentContext = documentService.searchRelevantContext(
                     request.getTopic(),
                     user.getId().toString(),
-                    8  // get more chunks for test generation
+                    8
             );
         }
 
-        // Build prompt for MCQ generation
         String prompt = buildMcqPrompt(request, documentContext);
 
-        // Call AI to generate MCQs
         String aiResponse = chatClient.prompt()
                 .user(prompt)
                 .call()
                 .content();
 
-        log.debug("AI MCQ response: {}", aiResponse);
-
-        // Parse AI response into structured questions
         List<TestQuestion> questions = parseAiResponse(aiResponse, request.getQuestionCount());
-
         if (questions.isEmpty()) {
-            throw new RuntimeException("Failed to generate valid questions. Please try again.");
+            throw new BadRequestException("Failed to generate valid questions. Please try again.");
         }
 
-        // Save TestSession
+        Conversation.DifficultyLevel difficultyLevel = parseDifficultyLevel(request.getDifficultyLevel());
+
         TestSession session = TestSession.builder()
                 .user(user)
                 .topic(request.getTopic())
-                .difficultyLevel(Conversation.DifficultyLevel.valueOf(
-                        request.getDifficultyLevel().toUpperCase()))
+                .difficultyLevel(difficultyLevel)
                 .status(TestSession.TestStatus.GENERATED)
                 .totalQuestions(questions.size())
                 .sourceDocument(sourceDocument)
                 .build();
         session = testSessionRepository.save(session);
 
-        // Save questions and options
         for (int i = 0; i < questions.size(); i++) {
-            TestQuestion q = questions.get(i);
-            q.setTestSession(session);
-            q.setQuestionOrder(i + 1);
+            TestQuestion question = questions.get(i);
+            question.setTestSession(session);
+            question.setQuestionOrder(i + 1);
 
-            List<QuestionOption> options = q.getOptions();
-            q.setOptions(null);  // detach options temporarily
-            TestQuestion savedQ = testQuestionRepository.save(q);  // gets real DB id
+            List<QuestionOption> options = question.getOptions();
+            question.setOptions(null);
+            TestQuestion savedQuestion = testQuestionRepository.save(question);
 
-            // Now attach options to saved question id
             if (options != null) {
-                for (QuestionOption opt : options) {
-                    opt.setTestQuestion(savedQ);
+                for (QuestionOption option : options) {
+                    option.setTestQuestion(savedQuestion);
                 }
-                savedQ.setOptions(options);
-                testQuestionRepository.save(savedQ);  // cascade saves options with question_id
+                savedQuestion.setOptions(options);
+                testQuestionRepository.save(savedQuestion);
             }
-            savedQ.getOptions().forEach(opt -> opt.setTestQuestion(savedQ));
         }
 
-        // Reload with questions
         return testSessionRepository.findById(session.getId()).orElse(session);
     }
 
-    // ----------------------------------------
-    // SUBMIT TEST
-    // ----------------------------------------
     @Transactional
     public TestSession submitTest(String email, Long sessionId, SubmitTestRequest request) {
-
         User user = getUser(email);
 
         TestSession session = testSessionRepository.findByIdAndUserId(sessionId, user.getId())
-                .orElseThrow(() -> new RuntimeException("Test not found or access denied"));
+                .orElseThrow(() -> new NotFoundException("Test not found"));
 
         if (session.getStatus() == TestSession.TestStatus.SUBMITTED) {
-            throw new RuntimeException("Test already submitted");
+            throw new ConflictException("Test already submitted");
         }
 
-        List<TestQuestion> questions = testQuestionRepository
-                .findByTestSessionIdOrderByQuestionOrderAsc(sessionId);
+        if (request == null || request.getAnswers() == null) {
+            throw new BadRequestException("Answers are required");
+        }
 
-        int correct = 0;
+        List<TestQuestion> questions = testQuestionRepository.findByTestSessionIdOrderByQuestionOrderAsc(sessionId);
+        Map<Long, Integer> answers = request.getAnswers();
 
+        Set<Long> questionIds = new HashSet<>();
         for (TestQuestion question : questions) {
-            Integer selectedIndex = request.getAnswers().get(question.getId());
-            if (selectedIndex != null) {
-                question.setSelectedOptionIndex(selectedIndex);
-                if (selectedIndex.equals(question.getCorrectOptionIndex())) {
-                    correct++;
-                }
-                testQuestionRepository.save(question);
+            questionIds.add(question.getId());
+        }
+
+        for (Long submittedQuestionId : answers.keySet()) {
+            if (!questionIds.contains(submittedQuestionId)) {
+                throw new BadRequestException("Invalid question id in answers: " + submittedQuestionId);
             }
         }
 
-        // Update session with results
-        double percentage = questions.isEmpty() ? 0 :
-                Math.round((correct * 100.0 / questions.size()) * 100.0) / 100.0;
+        int correct = 0;
+        for (TestQuestion question : questions) {
+            if (!answers.containsKey(question.getId())) {
+                continue;
+            }
+
+            Integer selectedIndex = answers.get(question.getId());
+            if (selectedIndex == null || selectedIndex < 0 || selectedIndex > 3) {
+                throw new BadRequestException("Invalid option index for question " + question.getId());
+            }
+
+            question.setSelectedOptionIndex(selectedIndex);
+            if (selectedIndex.equals(question.getCorrectOptionIndex())) {
+                correct++;
+            }
+            testQuestionRepository.save(question);
+        }
+
+        double percentage = questions.isEmpty()
+                ? 0
+                : Math.round((correct * 100.0 / questions.size()) * 100.0) / 100.0;
 
         session.setCorrectAnswers(correct);
         session.setScorePercentage(percentage);
@@ -156,26 +163,17 @@ public class TestService {
         return testSessionRepository.save(session);
     }
 
-    // ----------------------------------------
-    // GET USER TEST HISTORY
-    // ----------------------------------------
     public List<TestSession> getUserTests(String email) {
         User user = getUser(email);
         return testSessionRepository.findByUserIdOrderByCreatedAtDesc(user.getId());
     }
 
-    // ----------------------------------------
-    // GET TEST WITH RESULTS
-    // ----------------------------------------
     public TestSession getTestResults(String email, Long sessionId) {
         User user = getUser(email);
         return testSessionRepository.findByIdAndUserId(sessionId, user.getId())
-                .orElseThrow(() -> new RuntimeException("Test not found or access denied"));
+                .orElseThrow(() -> new NotFoundException("Test not found"));
     }
 
-    // ----------------------------------------
-    // BUILD MCQ PROMPT
-    // ----------------------------------------
     private String buildMcqPrompt(GenerateTestRequest request, String documentContext) {
         StringBuilder prompt = new StringBuilder();
 
@@ -188,9 +186,9 @@ public class TestService {
         prompt.append(String.format("""
                 Generate exactly %d multiple choice questions about: "%s"
                 Difficulty level: %s
-                
+
                 IMPORTANT: Respond with ONLY a valid JSON array. No explanation, no markdown, no extra text.
-                
+
                 Format:
                 [
                   {
@@ -200,9 +198,9 @@ public class TestService {
                     "explanation": "Brief explanation of why this answer is correct"
                   }
                 ]
-                
+
                 Rules:
-                - exacty %d questions
+                - exactly %d questions
                 - exactly 4 options each
                 - correctOptionIndex is 0, 1, 2, or 3
                 - questions should test understanding, not just memorization
@@ -217,49 +215,71 @@ public class TestService {
         return prompt.toString();
     }
 
-    // ----------------------------------------
-    // PARSE AI JSON RESPONSE
-    // ----------------------------------------
     private List<TestQuestion> parseAiResponse(String aiResponse, int expectedCount) {
         List<TestQuestion> questions = new ArrayList<>();
 
         try {
-            // Strip markdown code blocks if present
-            String cleaned = aiResponse.trim();
+            String cleaned = aiResponse == null ? "" : aiResponse.trim();
             if (cleaned.startsWith("```")) {
-                cleaned = cleaned.replaceAll("```json\\n?", "").replaceAll("```\\n?", "").trim();
+                cleaned = cleaned.replaceAll("```json\\n?", "")
+                        .replaceAll("```\\n?", "")
+                        .trim();
             }
 
-            // Find JSON array in response
             int start = cleaned.indexOf('[');
             int end = cleaned.lastIndexOf(']');
-            if (start == -1 || end == -1) {
-                log.error("No JSON array found in AI response: {}", aiResponse);
+            if (start == -1 || end == -1 || end <= start) {
+                log.error("No JSON array found in AI response");
                 return questions;
             }
 
-            cleaned = cleaned.substring(start, end + 1);
-            JsonNode jsonArray = objectMapper.readTree(cleaned);
+            JsonNode jsonArray = objectMapper.readTree(cleaned.substring(start, end + 1));
+            if (!jsonArray.isArray()) {
+                return questions;
+            }
 
             for (JsonNode node : jsonArray) {
-                TestQuestion question = new TestQuestion();
-                question.setQuestion(node.get("question").asText());
-                question.setCorrectOptionIndex(node.get("correctOptionIndex").asInt());
-                question.setExplanation(
-                        node.has("explanation") ? node.get("explanation").asText() : ""
-                );
-
-                // Parse options
-                List<QuestionOption> options = new ArrayList<>();
-                JsonNode optionsNode = node.get("options");
-                for (int i = 0; i < optionsNode.size(); i++) {
-                    QuestionOption opt = QuestionOption.builder()
-                            .optionIndex(i)
-                            .optionText(optionsNode.get(i).asText())
-                            .build();
-                    options.add(opt);
+                if (questions.size() >= expectedCount) {
+                    break;
                 }
+
+                String questionText = node.path("question").asText("").trim();
+                JsonNode optionsNode = node.path("options");
+                int correctOptionIndex = node.path("correctOptionIndex").asInt(-1);
+
+                if (questionText.isBlank() || !optionsNode.isArray() || optionsNode.size() != 4) {
+                    continue;
+                }
+
+                if (correctOptionIndex < 0 || correctOptionIndex > 3) {
+                    continue;
+                }
+
+                List<QuestionOption> options = new ArrayList<>(4);
+                boolean hasBlankOption = false;
+                for (int i = 0; i < 4; i++) {
+                    String optionText = optionsNode.get(i).asText("").trim();
+                    if (optionText.isBlank()) {
+                        hasBlankOption = true;
+                        break;
+                    }
+
+                    options.add(QuestionOption.builder()
+                            .optionIndex(i)
+                            .optionText(optionText)
+                            .build());
+                }
+
+                if (hasBlankOption) {
+                    continue;
+                }
+
+                TestQuestion question = new TestQuestion();
+                question.setQuestion(questionText);
+                question.setCorrectOptionIndex(correctOptionIndex);
+                question.setExplanation(node.path("explanation").asText(""));
                 question.setOptions(options);
+
                 questions.add(question);
             }
 
@@ -268,6 +288,18 @@ public class TestService {
         }
 
         return questions;
+    }
+
+    private Conversation.DifficultyLevel parseDifficultyLevel(String rawDifficulty) {
+        if (rawDifficulty == null || rawDifficulty.isBlank()) {
+            return Conversation.DifficultyLevel.INTERMEDIATE;
+        }
+
+        try {
+            return Conversation.DifficultyLevel.valueOf(rawDifficulty.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            throw new BadRequestException("Invalid difficulty level. Allowed: BEGINNER, INTERMEDIATE, ADVANCED");
+        }
     }
 
     private User getUser(String email) {

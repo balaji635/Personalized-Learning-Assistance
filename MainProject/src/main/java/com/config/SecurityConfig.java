@@ -4,6 +4,7 @@ import com.service.CustomUserDetailsService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -34,9 +35,6 @@ public class SecurityConfig {
     private final JwtAuthenticationFilter jwtAuthFilter;
     private final CustomUserDetailsService customUserDetailsService;
 
-    // ----------------------------------------
-    // SECURITY FILTER CHAIN
-    // ----------------------------------------
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
@@ -44,10 +42,14 @@ public class SecurityConfig {
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(
-                                "/api/auth/**",
+                                "/api/auth/register",
+                                "/api/auth/login",
+                                "/api/auth/refresh",
+                                "/api/auth/logout",
                                 "/v3/api-docs/**",
                                 "/swagger-ui/**"
                         ).permitAll()
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .sessionManagement(session ->
@@ -59,14 +61,12 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // ----------------------------------------
-    // CORS — Allow React frontend
-    // ----------------------------------------
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
         configuration.setAllowedOrigins(List.of(
                 "http://localhost:3000",
+                "http://127.0.0.1:3000",
                 "http://localhost:5173"
         ));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
@@ -78,18 +78,11 @@ public class SecurityConfig {
         return source;
     }
 
-    // ----------------------------------------
-    // EXPOSE CustomUserDetailsService as UserDetailsService bean
-    // Required so JwtAuthenticationFilter can autowire UserDetailsService
-    // ----------------------------------------
     @Bean
     public UserDetailsService userDetailsService() {
         return customUserDetailsService;
     }
 
-    // ----------------------------------------
-    // AUTHENTICATION PROVIDER
-    // ----------------------------------------
     @Bean
     public AuthenticationProvider authenticationProvider() {
         DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider(customUserDetailsService);
@@ -97,9 +90,6 @@ public class SecurityConfig {
         return authProvider;
     }
 
-    // ----------------------------------------
-    // BEANS
-    // ----------------------------------------
     @Bean
     public AuthenticationManager authenticationManager(AuthenticationConfiguration config)
             throws Exception {

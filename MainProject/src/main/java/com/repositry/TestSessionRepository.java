@@ -11,5 +11,8 @@ import java.util.UUID;
 @Repository
 public interface TestSessionRepository extends JpaRepository<TestSession, Long> {
     List<TestSession> findByUserIdOrderByCreatedAtDesc(UUID userId);
+
     Optional<TestSession> findByIdAndUserId(Long id, UUID userId);
+
+    List<TestSession> findBySourceDocumentId(Long sourceDocumentId);
 }

@@ -32,3 +32,10 @@ build/
 
 ### VS Code ###
 .vscode/
+backend.err.log
+backend.out.log
+backend.pid
+uploads/
+.env
+.env.*
+!.env.example

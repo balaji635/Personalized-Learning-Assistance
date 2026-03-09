@@ -1,4 +1,4 @@
-package com.MajorProject.MainProject.service;
+package com.service;
 
 public class UserService {
 }

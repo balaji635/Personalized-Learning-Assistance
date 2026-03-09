@@ -1,8 +1,24 @@
 package com.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import jakarta.persistence.*;
-import lombok.*;
+import jakarta.persistence.CascadeType;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.Table;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
@@ -47,15 +63,13 @@ public class TestSession {
     @Column(name = "submitted_at")
     private LocalDateTime submittedAt;
 
-    // ----------------------------------------
-    // Relationships
-    // ----------------------------------------
     @JsonIgnoreProperties({"password", "conversations", "documents", "testSessions"})
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
-    // Optionally linked to a document for RAG-based test generation
+    // Avoid LOB serialization issues when returning test sessions/results.
+    @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "document_id")
     private Document sourceDocument;
@@ -63,10 +77,8 @@ public class TestSession {
     @OneToMany(mappedBy = "testSession", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<TestQuestion> questions;
 
-    // ----------------------------------------
-    // Enum
-    // ----------------------------------------
     public enum TestStatus {
-        GENERATED, SUBMITTED
+        GENERATED,
+        SUBMITTED
     }
 }

@@ -2,8 +2,23 @@ package com.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import jakarta.persistence.*;
-import lombok.*;
+import jakarta.persistence.Basic;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.Lob;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
@@ -29,9 +44,8 @@ public class Document {
     @Column(name = "file_size")
     private Long fileSize;
 
-    // ← Store raw file bytes directly in PostgreSQL (bytea column)
-    // No filesystem needed — file lives entirely in the DB
-    @JsonIgnore  // never send binary data in API responses
+    @JsonIgnore
+    @Basic(fetch = FetchType.LAZY)
     @Lob
     @Column(name = "file_data", nullable = false)
     private byte[] fileData;
@@ -47,18 +61,14 @@ public class Document {
     @Column(name = "uploaded_at", updatable = false)
     private LocalDateTime uploadedAt;
 
-    // ----------------------------------------
-    // Relationships
-    // ----------------------------------------
     @JsonIgnoreProperties({"password", "conversations", "documents", "testSessions"})
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
-    // ----------------------------------------
-    // Enum
-    // ----------------------------------------
     public enum DocumentStatus {
-        PROCESSING, READY, FAILED
+        PROCESSING,
+        READY,
+        FAILED
     }
 }

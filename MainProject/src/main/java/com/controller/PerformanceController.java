@@ -1,4 +1,4 @@
-package com.MajorProject.MainProject.controller;
+package com.controller;
 
 public class PerformanceController {
 }

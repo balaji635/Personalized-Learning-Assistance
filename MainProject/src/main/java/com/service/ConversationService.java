@@ -1,5 +1,6 @@
 package com.service;
 
+import com.exception.NotFoundException;
 import com.model.Conversation;
 import com.model.Message;
 import com.model.User;
@@ -36,7 +37,7 @@ public class ConversationService {
 
         Conversation conversation = new Conversation();
         conversation.setUser(user);
-        conversation.setTitle(title != null ? title : "New Conversation");
+        conversation.setTitle(normalizeTitle(title));
         conversation.setDifficultyLevel(difficulty != null ? difficulty : Conversation.DifficultyLevel.BEGINNER);
         conversation.setCreatedAt(LocalDateTime.now());
         conversation.setUpdatedAt(LocalDateTime.now());
@@ -48,7 +49,7 @@ public class ConversationService {
         User user = getUser(email);
 
         if (!conversationRepository.existsByIdAndUserId(conversationId, user.getId())) {
-            throw new RuntimeException("Conversation not found or access denied");
+            throw new NotFoundException("Conversation not found");
         }
 
         return messageRepository.findByConversationIdOrderByCreatedAtAsc(conversationId);
@@ -60,7 +61,7 @@ public class ConversationService {
 
         Conversation conversation = conversationRepository
                 .findByIdAndUserId(conversationId, user.getId())
-                .orElseThrow(() -> new RuntimeException("Conversation not found or access denied"));
+                .orElseThrow(() -> new NotFoundException("Conversation not found"));
 
         List<Message> messages = messageRepository.findByConversationIdOrderByCreatedAtAsc(conversationId);
         messageRepository.deleteAll(messages);
@@ -69,25 +70,36 @@ public class ConversationService {
 
     @Transactional
     public void updateTitleIfDefault(Long conversationId, String firstMessage) {
-        conversationRepository.findById(conversationId).ifPresent(conv -> {
-            if ("New Conversation".equals(conv.getTitle())) {
-                String autoTitle = firstMessage.length() > 50
-                        ? firstMessage.substring(0, 50) + "..."
-                        : firstMessage;
-                conv.setTitle(autoTitle);
-                conversationRepository.save(conv);
+        if (firstMessage == null || firstMessage.isBlank()) {
+            return;
+        }
+
+        conversationRepository.findById(conversationId).ifPresent(conversation -> {
+            if ("New Conversation".equals(conversation.getTitle())) {
+                String cleanedMessage = firstMessage.trim();
+                String autoTitle = cleanedMessage.length() > 50
+                        ? cleanedMessage.substring(0, 50) + "..."
+                        : cleanedMessage;
+                conversation.setTitle(autoTitle);
+                conversationRepository.save(conversation);
             }
         });
     }
 
-    // ← UUID parameter
     public Conversation getConversationForUser(Long conversationId, UUID userId) {
         return conversationRepository.findByIdAndUserId(conversationId, userId)
-                .orElseThrow(() -> new RuntimeException("Conversation not found or access denied"));
+                .orElseThrow(() -> new NotFoundException("Conversation not found"));
     }
 
     private User getUser(String email) {
         return userRepository.findByEmail(email)
                 .orElseThrow(() -> new UsernameNotFoundException("User not found: " + email));
+    }
+
+    private String normalizeTitle(String title) {
+        if (title == null || title.isBlank()) {
+            return "New Conversation";
+        }
+        return title.trim();
     }
 }
