@@ -1,4 +1,4 @@
-﻿const fs = require("fs");
+const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 
@@ -10,17 +10,26 @@ try {
   console.warn("Could not clear .next cache:", error);
 }
 
-const nextBin = path.join(
-  process.cwd(),
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "next.cmd" : "next"
-);
+let nextCli;
+try {
+  nextCli = require.resolve("next/dist/bin/next");
+} catch (error) {
+  console.error(
+    "Could not locate Next.js CLI (next/dist/bin/next). Run npm install first."
+  );
+  process.exit(1);
+}
 
-const child = spawn(nextBin, ["dev"], {
+const child = spawn(process.execPath, [nextCli, "dev"], {
   stdio: "inherit",
   shell: false,
   env: process.env,
+  cwd: process.cwd(),
+});
+
+child.on("error", (error) => {
+  console.error("Failed to start Next.js dev server:", error);
+  process.exit(1);
 });
 
 child.on("exit", (code, signal) => {
