@@ -1,4 +1,4 @@
-﻿# README
+# README
 
 Generated on: 2026-03-10
 Repository root: D:\projects\major-proj

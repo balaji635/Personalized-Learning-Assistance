@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -70,9 +70,7 @@ export default function AuthForm() {
 
   return (
     <div className="auth-shell">
-      <section className="auth-copy">
-        <p className="auth-badge">Connected to MainProject backend</p>
-        <h1>Learn faster with guided AI study sessions.</h1>
+      <section className="auth-copy">        <h1>Learn faster with guided AI study sessions.</h1>
         <p>
           Sign in to continue your conversations, documents, and assessments from one place.
         </p>

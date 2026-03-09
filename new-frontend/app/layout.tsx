@@ -1,9 +1,9 @@
-import type { Metadata } from "next";
+﻿import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Nexus - AI Learning Platform",
-  description: "Learning platform UI connected to MainProject backend",
+  description: "Learning platform UI",
 };
 
 export default function RootLayout({
