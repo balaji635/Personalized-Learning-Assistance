@@ -6,7 +6,8 @@ const API_BASE_URL =
 
 export async function getCurrentUser(): Promise<UserProfile | null> {
   try {
-    const cookieHeader = cookies().toString();
+    	const cookieStore = await cookies();
+	const cookieHeader = cookieStore.toString();
     if (!cookieHeader) {
       return null;
     }

@@ -1,4 +1,4 @@
-﻿package com.service;
+package com.service;
 
 import com.config.JpaChatMemory;
 import com.dto.ChatRequest;
@@ -18,8 +18,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.Locale;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -33,6 +36,15 @@ public class ChatService {
     private final JpaChatMemory jpaChatMemory;
     private final DocumentService documentService;
 
+    private static final Set<String> STOP_WORDS = Set.of(
+            "the","a","an","is","it","in","on","at","to","for","of","and","or","but",
+            "with","this","that","are","was","were","be","been","have","has","had",
+            "do","does","did","will","would","can","could","should","may","might",
+            "from","by","as","into","about","after","before","its","their","our",
+            "your","my","we","he","she","they","i","not","no","so","if","then",
+            "than","also","more","how","what","which","give","tell","explain","define"
+    );
+
     @Transactional
     public ChatResponse chat(String email, Long conversationId, ChatRequest request) {
         User user = userRepository.findByEmail(email)
@@ -40,20 +52,125 @@ public class ChatService {
 
         Conversation conversation = conversationService.getConversationForUser(conversationId, user.getId());
         String userMessage = request.getMessage().trim();
-        String memoryKey = "user_" + user.getId() + "_conv_" + conversationId;
-        boolean strictDocumentMode = isStrictDocumentRequest(userMessage);
+        String memoryKey   = "user_" + user.getId() + "_conv_" + conversationId;
 
+        // ── RAG RETRIEVAL ─────────────────────────────────────────────
         String ragContext = documentService.searchRelevantContext(
-                userMessage,
-                user.getId().toString(),
-                10
-        );
+                userMessage, user.getId().toString(), 8);
+        boolean ragUsed = ragContext != null && !ragContext.isBlank();
 
+        // cosine similarity = 1 - distance (already converted in DocumentService)
+        double avgRetrievalScore = documentService.getLastAvgRetrievalScore();
+
+        double relevanceScore    = 0.0;
+        double faithfulnessScore = 0.0;
+
+        if (ragUsed) {
+
+            // ════════════════════════════════════════════════════════
+            // METRIC 1 — RELEVANCE  (pure math, no LLM)
+            // Jaccard Similarity = |Q ∩ C| / |Q ∪ C|
+            // How many of the question's key words appear in context?
+            // ════════════════════════════════════════════════════════
+            relevanceScore = avgRetrievalScore;
+
+            log.info("╔══ RAG RELEVANCE SCORE ══════════════════════════╗");
+            log.info("║ Source    : PgVector cosine similarity (1-distance)");
+            log.info("║ Question  : {}", userMessage);
+            log.info("║ Score     : {}", String.format("%.4f", relevanceScore));
+//            log.info("║ Quality   : {}", relevanceScore >= 0.75 ? "GOOD ✅" :
+//                    relevanceScore >= 0.55 ? "MODERATE ⚠️" : "POOR ❌");
+            log.info("╚═════════════════════════════════════════════════╝");
+
+            // ── BUILD PROMPT + CALL AI ────────────────────────────────
+            String systemPrompt = buildSystemPrompt(
+                    conversation.getDifficultyLevel().name(),
+                    user.getFirstName(),
+                    ragContext
+            );
+
+            MessageChatMemoryAdvisor memoryAdvisor = MessageChatMemoryAdvisor.builder(jpaChatMemory)
+                    .conversationId(memoryKey)
+                    .build();
+
+            String aiResponse = chatClient.prompt()
+                    .system(systemPrompt)
+                    .user(userMessage)
+                    .advisors(memoryAdvisor)
+                    .call()
+                    .content();
+
+            if (aiResponse == null || aiResponse.isBlank()) {
+                throw new BadRequestException("AI returned an empty response");
+            }
+
+            // ════════════════════════════════════════════════════════
+            // METRIC 2 — FAITHFULNESS  (pure math, no LLM)
+            // Token Overlap = |Answer ∩ Context| / |Answer tokens|
+            // How many of the answer's key words came from the context?
+            // ════════════════════════════════════════════════════════
+            faithfulnessScore = tokenOverlap(aiResponse, ragContext);
+
+            log.info("╔══ RAG FAITHFULNESS SCORE (Token Overlap) ═══════╗");
+            log.info("║ Formula   : |Answer∩Context| / |Answer tokens|");
+            log.info("║ Score     : {}", String.format("%.4f", faithfulnessScore));
+//            log.info("║ Hallucination : {}", faithfulnessScore >= 0.55 ? "LOW RISK ✅" :
+//                    faithfulnessScore >= 0.30 ? "MODERATE ⚠️" : "HIGH RISK ❌");
+            log.info("╚═════════════════════════════════════════════════╝");
+
+            // ════════════════════════════════════════════════════════
+            // METRIC 3 — HALLUCINATION RISK  (combines all 3 scores)
+            // ════════════════════════════════════════════════════════
+            boolean retrievalPoor    = avgRetrievalScore < 0.45;
+            boolean faithfulnessPoor = faithfulnessScore < 0.25;
+
+
+            String finalRisk;
+            if (retrievalPoor && faithfulnessPoor) {
+                finalRisk = "HIGH ❌  — Answer likely hallucinated!";
+            } else if (retrievalPoor) {
+                finalRisk = "MEDIUM ⚠️ — Low context match, verify answer.";
+            } else {
+                finalRisk = "LOW ✅  — Answer grounded in document.";
+            }
+
+            log.info("╔══ HALLUCINATION RISK ASSESSMENT ════════════════╗");
+            log.info("║ Retrieval Score    : {} (cosine similarity 1-distance)", String.format("%.4f", avgRetrievalScore));
+            log.info("║ Relevance Score    : {} (same as retrieval - PgVector cosine)",             String.format("%.4f", relevanceScore));
+            log.info("║ Faithfulness Score : {} (token overlap Answer∩Context)", String.format("%.4f", faithfulnessScore));
+            log.info("║ FINAL RISK         : {}", finalRisk);
+            log.info("╚═════════════════════════════════════════════════╝");
+
+            log.info("╔══ RAG PIPELINE SUMMARY ═════════════════════════╗");
+            log.info("║ User     : {}", email);
+            log.info("║ RAG Used : YES ✅");
+            log.info("╚═════════════════════════════════════════════════╝");
+
+            conversationService.updateTitleIfDefault(conversationId, userMessage);
+
+            Message latestAssistant = messageRepository
+                    .findByConversationIdOrderByCreatedAtAsc(conversationId)
+                    .stream()
+                    .filter(m -> m.getRole() == Message.MessageRole.ASSISTANT)
+                    .reduce((first, second) -> second)
+                    .orElse(null);
+
+            log.info("Chat completed for conversation {} user {}", conversationId, email);
+
+            return ChatResponse.builder()
+                    .messageId(latestAssistant != null ? latestAssistant.getId() : null)
+                    .role("ASSISTANT")
+                    .content(aiResponse)
+                    .conversationId(conversationId)
+                    .timestamp(latestAssistant != null ? latestAssistant.getCreatedAt() : LocalDateTime.now())
+                    .build();
+        }
+
+        // ── NO RAG — answer from general knowledge ────────────────────
         String systemPrompt = buildSystemPrompt(
                 conversation.getDifficultyLevel().name(),
                 user.getFirstName(),
-                ragContext,
-                strictDocumentMode
+                null
         );
 
         MessageChatMemoryAdvisor memoryAdvisor = MessageChatMemoryAdvisor.builder(jpaChatMemory)
@@ -71,12 +188,17 @@ public class ChatService {
             throw new BadRequestException("AI returned an empty response");
         }
 
+        log.info("╔══ RAG PIPELINE SUMMARY ═════════════════════════╗");
+        log.info("║ User     : {}", email);
+        log.info("║ RAG Used : NO — no documents uploaded");
+        log.info("╚═════════════════════════════════════════════════╝");
+
         conversationService.updateTitleIfDefault(conversationId, userMessage);
 
         Message latestAssistant = messageRepository
                 .findByConversationIdOrderByCreatedAtAsc(conversationId)
                 .stream()
-                .filter(message -> message.getRole() == Message.MessageRole.ASSISTANT)
+                .filter(m -> m.getRole() == Message.MessageRole.ASSISTANT)
                 .reduce((first, second) -> second)
                 .orElse(null);
 
@@ -95,78 +217,93 @@ public class ChatService {
         jpaChatMemory.clear("user_" + userId + "_conv_" + conversationId);
     }
 
-    private String buildSystemPrompt(String difficultyLevel, String firstName, String ragContext, boolean strictDocumentMode) {
-        String groundingRules = "Grounding rules:\n" +
-                "1) Use the retrieved document context as the primary source when it is provided.\n" +
-                "2) Never invent page numbers, section numbers, quotes, or facts not present in retrieved context.\n" +
-                "3) If a user asks about a specific page but page data is not present in context, say that page-level evidence is unavailable.\n" +
-                "4) If an earlier assistant response may be wrong, acknowledge uncertainty and correct only using available evidence.\n" +
-                "5) When possible, mention source labels like file/page from retrieved context.\n";
+    // ═════════════════════════════════════════════════════════════
+    // MATH — no LLM involved at all
+    // ═════════════════════════════════════════════════════════════
 
-        String confidenceStyle = "Confidence style:\n" +
-                "1) Be confident, direct, and clear when evidence supports an answer.\n" +
-                "2) Do not be overconfident when evidence is missing. Clearly state limits instead of guessing.\n";
+    /**
+     * Jaccard Similarity = |A ∩ B| / |A ∪ B|
+     */
+    private double queryRecall(String question, String context) {
+        Set<String> questionTokens = tokenize(question);
+        Set<String> contextTokens  = tokenize(context);
+        if (questionTokens.isEmpty()) return 0.0;
 
-        String strictModeRules = "";
-        if (strictDocumentMode) {
-            strictModeRules = "STRICT DOCUMENT MODE ENABLED (user asked for strict PDF/document answer):\n" +
-                    "1) Answer using ONLY the retrieved document context in this turn.\n" +
-                    "2) Do NOT use general knowledge, prior guesses, or unstated assumptions for factual claims.\n" +
-                    "3) If requested detail is not present in retrieved context, explicitly say it is not available in retrieved document context.\n" +
-                    "4) Never fabricate page numbers or section labels.\n";
-        }
+        long matched = questionTokens.stream()
+                .filter(contextTokens::contains)
+                .count();
 
+        return Math.round((double) matched / questionTokens.size() * 10000.0) / 10000.0;
+    }
+
+    /**
+     * Token Overlap = |Answer ∩ Context| / |Answer tokens|
+     */
+    private double tokenOverlap(String answer, String context) {
+        Set<String> answerTokens  = tokenize(answer);
+        Set<String> contextTokens = tokenize(context);
+        if (answerTokens.isEmpty()) return 0.0;
+
+        long overlap = answerTokens.stream()
+                .filter(contextTokens::contains)
+                .count();
+
+        return Math.round((double) overlap / answerTokens.size() * 10000.0) / 10000.0;
+    }
+
+    /**
+     * Tokenize: lowercase, remove punctuation, remove stop words, min length 3
+     */
+    private Set<String> tokenize(String text) {
+        return Arrays.stream(
+                        text.toLowerCase()
+                                .replaceAll("[^a-z0-9\\s]", " ")
+                                .trim()
+                                .split("\\s+"))
+                .filter(t -> t.length() >= 3)
+                .filter(t -> !STOP_WORDS.contains(t))
+                .collect(Collectors.toSet());
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    // SYSTEM PROMPT
+    // ═════════════════════════════════════════════════════════════
+    private String buildSystemPrompt(String difficultyLevel, String firstName, String ragContext) {
         String basePrompt = String.format(
-                "You are an expert AI learning assistant helping %s. " +
-                        "You are knowledgeable, patient, and encouraging. " +
-                        "Always provide clear explanations with examples. " +
-                        "Remember the context of this conversation. ",
+                "You are an AI learning assistant helping %s study technical and academic topics. " +
+                        "Your ONLY purpose is to help with learning. \n\n" +
+                        "ALLOWED: " +
+                        "- Greetings and simple conversational openers (hi, hello, how are you → respond briefly and guide back to learning) " +
+                        "- Questions about programming, computer science, mathematics, engineering, science, " +
+                        "  history, geography, economics, medicine, law, and any academic subject. " +
+                        "- Requests to explain concepts, solve problems, review notes, generate quizzes. \n\n" +
+                        "NOT ALLOWED — respond with exactly: " +
+                        "\"I'm your learning assistant! I'm here to help you study and understand academic topics. " +
+                        "Feel free to ask me anything related to your studies!\" " +
+                        "- Emotional support, venting, personal problems, relationships " +
+                        "- Movies, celebrities, entertainment, sports gossip, social media " +
+                        "- Opinions on politics, religion, or controversial topics " +
+                        "- Anything unrelated to learning or academics \n\n" +
+                        "Always provide clear explanations with examples when appropriate. " +
+                        "Be encouraging and supportive of the student's learning journey. ",
                 firstName
         );
 
-        StringBuilder contextualPrompt = new StringBuilder();
-        contextualPrompt.append(groundingRules).append("\n");
-        contextualPrompt.append(confidenceStyle).append("\n");
-
-        if (!strictModeRules.isBlank()) {
-            contextualPrompt.append(strictModeRules).append("\n");
-        }
-
         if (ragContext != null && !ragContext.isBlank()) {
-            contextualPrompt.append("Retrieved context:\n").append(ragContext).append("\n");
-        } else if (strictDocumentMode) {
-            contextualPrompt.append("Retrieved context:\n[No matching document context found for this query]\n");
+            basePrompt = ragContext + "\n\nUsing the above context when relevant, " + basePrompt;
         }
-
-        String mergedPrompt = contextualPrompt + "\n" + basePrompt;
 
         return switch (difficultyLevel) {
-            case "BEGINNER" -> mergedPrompt +
+            case "BEGINNER" -> basePrompt +
                     "The student is a BEGINNER. Use simple language, avoid jargon, " +
-                    "explain every concept from scratch, and use clear examples.";
-            case "INTERMEDIATE" -> mergedPrompt +
-                    "The student is at INTERMEDIATE level. Use proper technical terms " +
-                    "and provide examples where relevant.";
-            case "ADVANCED" -> mergedPrompt +
+                    "explain every concept from scratch, use lots of analogies and simple examples.";
+            case "INTERMEDIATE" -> basePrompt +
+                    "The student is at INTERMEDIATE level. Use proper technical terms, " +
+                    "provide code examples where relevant.";
+            case "ADVANCED" -> basePrompt +
                     "The student is ADVANCED. Use technical terminology freely, " +
-                    "go deep into implementation details, and discuss tradeoffs.";
-            default -> mergedPrompt;
+                    "go deep into implementation details, discuss tradeoffs and best practices.";
+            default -> basePrompt;
         };
-    }
-
-    private boolean isStrictDocumentRequest(String userMessage) {
-        if (userMessage == null || userMessage.isBlank()) {
-            return false;
-        }
-
-        String normalized = userMessage.toLowerCase(Locale.ROOT);
-
-        boolean mentionsDocument = normalized.contains("document") || normalized.contains("pdf") || normalized.contains("file");
-        boolean asksStrict = normalized.contains("strict") || normalized.contains("only") || normalized.contains("exact") || normalized.contains("just");
-        boolean asksFromSource = normalized.contains("from document") || normalized.contains("from pdf")
-                || normalized.contains("from the document") || normalized.contains("from the pdf")
-                || normalized.contains("document only") || normalized.contains("pdf only");
-
-        return (mentionsDocument && asksStrict) || asksFromSource;
     }
 }
